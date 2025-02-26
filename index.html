@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Pavlov Server Browser</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0/css/materialize.min.css" rel="stylesheet">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <style>
+        body {
+            background-color: #121212;
+            color: #ffffff;
+        }
+        .card {
+            background-color: #1e1e1e;
+        }
+        .card-title {
+            color: #9c27b0; /* Purple accent */
+        }
+        .input-field input, .input-field label {
+            color: #ffffff;
+        }
+        .input-field input:focus, .input-field label.active {
+            color: #9c27b0;
+        }
+        .btn {
+            background-color: #9c27b0;
+        }
+        .card-container {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-around;
+        }
+        .card-container > [class*="col"] {
+            display: flex;
+            flex-direction: column;
+        }
+        .card {
+            flex: 1;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module">
+    import init from "./pkg/PavlovServerBrowser.js";
+    init();
+</script>
+</body>
+</html>
