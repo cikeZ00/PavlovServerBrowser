@@ -4,6 +4,7 @@ use serde::Deserialize;
 use gloo_net::http::Request;
 use wasm_bindgen_futures::spawn_local;
 use gloo_timers::callback::Interval;
+use web_sys::HtmlSelectElement;
 
 #[derive(Deserialize, Debug, Clone)]
 struct Server {
@@ -27,6 +28,12 @@ struct ServerList {
     servers: Vec<Server>,
 }
 
+#[derive(Clone, PartialEq)]
+enum SortCriteria {
+    Name,
+    Slots,
+}
+
 #[function_component(App)]
 fn app() -> Html {
     let servers = use_state(|| Vec::<Server>::new());
@@ -34,6 +41,7 @@ fn app() -> Html {
     let refresh_interval = use_state(|| 60u32); // in seconds
     let auto_refresh = use_state(|| false);
     let version = use_state(|| "1.0.24".to_string());
+    let sort_criteria = use_state(|| SortCriteria::Slots);
 
     // Callback to fetch server data using the specified version.
     let fetch_data = {
@@ -77,7 +85,8 @@ fn app() -> Html {
             (refresh_interval_val, auto_refresh_val, version_val),
         );
     }
-    // Filter
+
+    // Filter and sort
     let mut filtered_servers: Vec<Server> = servers
         .iter()
         .cloned()
@@ -91,7 +100,15 @@ fn app() -> Html {
             }
         })
         .collect();
-    filtered_servers.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    match *sort_criteria {
+        SortCriteria::Name => {
+            filtered_servers.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        }
+        SortCriteria::Slots => {
+            filtered_servers.sort_by(|a, b| b.slots.cmp(&a.slots));
+        }
+    }
 
     // Handler for search input.
     let on_search = {
@@ -131,49 +148,70 @@ fn app() -> Html {
         })
     };
 
+    // Handler for sort criteria change.
+    let on_sort_change = {
+        let sort_criteria = sort_criteria.clone();
+        Callback::from(move |e: Event| {
+            let input: HtmlSelectElement = e.target_unchecked_into();
+            let value = input.value();
+            match value.as_str() {
+                "Name" => sort_criteria.set(SortCriteria::Name),
+                "Slots" => sort_criteria.set(SortCriteria::Slots),
+                _ => {}
+            }
+        })
+    };
+
     html! {
-        <div class="container" style="padding-top: 20px;">
-            <h1 class="center-align" style="color: #9c27b0;">{ "Pavlov Server Browser" }</h1>
-            <div class="row">
-                <div class="input-field col s12 m3">
-                    <input id="search" type="text" value={(*search_query).clone()} oninput={on_search} />
-                    <label for="search" class="active" style="color: #9c27b0;">{ "Search" }</label>
-                </div>
-                <div class="input-field col s12 m3">
-                    <input id="interval" type="number" min="5" value={refresh_interval.to_string()} oninput={on_interval_change} />
-                    <label for="interval" class="active" style="color: #9c27b0;">{ "Refresh Interval (sec)" }</label>
-                </div>
-                <div class="input-field col s12 m3">
-                    <input id="version" type="text" value={(*version).clone()} oninput={on_version_change} />
-                    <label for="version" class="active" style="color: #9c27b0;">{ "Version" }</label>
-                </div>
-                <div class="input-field col s12 m3">
-                    <p>
-                      <label style="color: #9c27b0;">
-                        <input id="auto_refresh" type="checkbox" checked={*auto_refresh} onchange={on_toggle_auto} />
-                        <span>{ "Auto Refresh" }</span>
-                      </label>
-                    </p>
-                </div>
+    <div class="container" style="padding-top: 20px;">
+        <h1 class="center-align" style="color: #9c27b0;">{ "Pavlov Server Browser" }</h1>
+        <div class="row">
+            <div class="input-field col s12 m3">
+                <input id="search" type="text" value={(*search_query).clone()} oninput={on_search} />
+                <label for="search" class="active" style="color: #9c27b0;">{ "Search" }</label>
             </div>
-            <div class="row card-container">
-                { for filtered_servers.iter().map(|server| html! {
-                    <div class="col s12 m6 l4">
-                        <div class="card hoverable">
-                            <div class="card-content">
-                                <span class="card-title">{ &server.name }</span>
-                                <p>{ format!("IP: {}", server.ip) }</p>
-                                <p>{ format!("Map: {} (ID: {})", server.mapLabel, server.mapId) }</p>
-                                <p>{ format!("Game Mode: {} (Label: {})", server.gameMode, server.gameModeLabel) }</p>
-                                <p>{ format!("Version: {}", server.version) }</p>
-                                <p>{ format!("Updated: {}", server.updated) }</p>
-                                <p>{ format!("Slots: {}/{}", server.slots, server.maxSlots) }</p>
-                            </div>
-                        </div>
-                    </div>
-                })}
+            <div class="input-field col s12 m3">
+                <input id="interval" type="number" min="5" value={refresh_interval.to_string()} oninput={on_interval_change} />
+                <label for="interval" class="active" style="color: #9c27b0;">{ "Refresh Interval (sec)" }</label>
+            </div>
+            <div class="input-field col s12 m3">
+                <input id="version" type="text" value={(*version).clone()} oninput={on_version_change} />
+                <label for="version" class="active" style="color: #9c27b0;">{ "Version" }</label>
+            </div>
+            <div class="input-field col s12 m3">
+                <p>
+                  <label style="color: #9c27b0;">
+                    <input id="auto_refresh" type="checkbox" checked={*auto_refresh} onchange={on_toggle_auto} />
+                    <span>{ "Auto Refresh" }</span>
+                  </label>
+                </p>
+            </div>
+            <div class="input-field col s12 m3">
+                <select id="sort" class="browser-default" onchange={on_sort_change}>
+                    <option value="Name">{ "Name" }</option>
+                    <option value="Slots">{ "Slots" }</option>
+                </select>
+                <label for="sort" class="active" style="color: #9c27b0;">{ "Sort By" }</label>
             </div>
         </div>
+        <div class="row card-container">
+            { for filtered_servers.iter().map(|server| html! {
+                <div class="col s12 m6 l4">
+                    <div class="card hoverable">
+                        <div class="card-content">
+                            <span class="card-title">{ &server.name }</span>
+                            <p>{ format!("IP: {}", server.ip) }</p>
+                            <p>{ format!("Map: {} (ID: {})", server.mapLabel, server.mapId) }</p>
+                            <p>{ format!("Game Mode: {} (Label: {})", server.gameMode, server.gameModeLabel) }</p>
+                            <p>{ format!("Version: {}", server.version) }</p>
+                            <p>{ format!("Updated: {}", server.updated) }</p>
+                            <p>{ format!("Slots: {}/{}", server.slots, server.maxSlots) }</p>
+                        </div>
+                    </div>
+                </div>
+            })}
+        </div>
+    </div>
     }
 }
 
