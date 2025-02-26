@@ -3,7 +3,6 @@ name: Deploy to GitHub Pages
 permissions:
   contents: write
 
-
 on:
   push:
     branches:
@@ -28,11 +27,17 @@ jobs:
       - name: Build Wasm package
         run: wasm-pack build --target web --release
 
+      - name: List pkg directory (debug)
+        run: ls -la pkg
+
       - name: Prepare deploy directory
         run: |
           mkdir -p dist
           cp index.html dist/
           cp -r pkg dist/pkg
+
+      - name: List dist directory (debug)
+        run: ls -la dist && ls -la dist/pkg
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
