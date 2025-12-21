@@ -40,7 +40,7 @@ fn app() -> Html {
     let search_query = use_state(|| "".to_string());
     let refresh_interval = use_state(|| 60u32); // in seconds
     let auto_refresh = use_state(|| false);
-    let version = use_state(|| "1.0.24".to_string());
+    let version = use_state(|| "1.0.27".to_string());
     let sort_criteria = use_state(|| SortCriteria::Slots);
 
     // Callback to fetch server data using the specified version.
@@ -52,7 +52,7 @@ fn app() -> Html {
             let version = (*version).clone();
             spawn_local(async move {
                 let url = format!(
-                    "https://prod-crossplay-pavlov-ms.vankrupt.net/servers/v2/list/{}/steam/0/0/0/all",
+                    "https://prod2-crossplay-pavlov-ms.vankrupt.net/servers/v2/list/{}/steam/0/0/0/all",
                     version
                 );
                 if let Ok(resp) = Request::get(&url).send().await {
