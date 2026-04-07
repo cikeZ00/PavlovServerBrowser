@@ -98,7 +98,23 @@ fn format_server_updated_timestamp(raw: &str) -> String {
     if date.get_time().is_nan() {
         raw.to_string()
     } else {
-        date.to_string().into()
+        const SHORT_MONTHS: [&str; 12] = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
+            "Dec",
+        ];
+
+        let month = SHORT_MONTHS
+            .get(date.get_month() as usize)
+            .copied()
+            .unwrap_or("???");
+
+        format!(
+            "{:02} {} {:02}:{:02}",
+            date.get_date() as u32,
+            month,
+            date.get_hours() as u32,
+            date.get_minutes() as u32
+        )
     }
 }
 
@@ -576,7 +592,7 @@ fn app() -> Html {
                                             <td data-label="Version">
                                                 <div class="td-content">
                                                     <div class="server-label">{ &server.version }</div>
-                                                    <div class="server-sub-label">{ format_server_updated_timestamp(&server.updated) }</div>
+                                                    <div class="server-sub-label server-updated-pill">{ format_server_updated_timestamp(&server.updated) }</div>
                                                 </div>
                                             </td>
                                         </tr>
