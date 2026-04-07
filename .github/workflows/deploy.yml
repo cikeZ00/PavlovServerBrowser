@@ -41,6 +41,7 @@ jobs:
         run: |
           mkdir -p dist
           cp index.html dist/
+          cp styles.css dist/
           cp -r pkg dist/pkg
 
       - name: Setup Pages
