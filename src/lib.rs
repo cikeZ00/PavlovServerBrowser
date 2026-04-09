@@ -1,10 +1,12 @@
 mod known_versions;
 
+use std::collections::{HashMap, HashSet};
+
 use gloo_net::http::Request;
 use gloo_timers::callback::Interval;
-use js_sys::Date;
+use js_sys::{Array, Date, Function, Object, Reflect};
 use serde::Deserialize;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::{JsCast, prelude::*};
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlInputElement, HtmlSelectElement, Storage};
 use yew::prelude::*;
@@ -20,6 +22,7 @@ const STORAGE_KEY_SORT_BY: &str = "psb.sort_by";
 const STORAGE_KEY_REFRESH_INTERVAL: &str = "psb.refresh_interval";
 const STORAGE_KEY_SELECTED_VERSION: &str = "psb.selected_version";
 const STORAGE_KEY_CUSTOM_VERSIONS: &str = "psb.custom_versions";
+const STORAGE_KEY_FAVORITES: &str = "psb.favorites";
 
 fn browser_storage() -> Option<Storage> {
     web_sys::window()?.local_storage().ok().flatten()
@@ -68,6 +71,24 @@ fn serialize_custom_versions(versions: &[String]) -> String {
     versions.join("\n")
 }
 
+fn load_favorites() -> Vec<String> {
+    let mut favorites = Vec::new();
+
+    if let Some(raw) = storage_get(STORAGE_KEY_FAVORITES) {
+        for key in raw.lines().map(str::trim).filter(|value| !value.is_empty()) {
+            if !favorites.iter().any(|saved| saved == key) {
+                favorites.push(key.to_string());
+            }
+        }
+    }
+
+    favorites
+}
+
+fn serialize_favorites(favorites: &[String]) -> String {
+    favorites.join("\n")
+}
+
 fn is_known_version(version: &str) -> bool {
     KNOWN_VERSIONS
         .iter()
@@ -90,6 +111,90 @@ fn merge_version_options(custom_versions: &[String]) -> Vec<String> {
     }
 
     options
+}
+
+fn server_storage_key(server: &Server) -> String {
+    format!("{}:{}", server.ip, server.port)
+}
+
+fn notification_permission() -> Option<String> {
+    let window = web_sys::window()?;
+    let notification_ctor = Reflect::get(&window, &JsValue::from_str("Notification")).ok()?;
+
+    Reflect::get(&notification_ctor, &JsValue::from_str("permission"))
+        .ok()
+        .and_then(|value| value.as_string())
+}
+
+fn request_notification_permission_if_needed() {
+    if notification_permission().as_deref() != Some("default") {
+        return;
+    }
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(notification_ctor) = Reflect::get(&window, &JsValue::from_str("Notification")) else {
+        return;
+    };
+    let Ok(request_permission) =
+        Reflect::get(&notification_ctor, &JsValue::from_str("requestPermission"))
+    else {
+        return;
+    };
+    let Some(request_permission) = request_permission.dyn_ref::<Function>() else {
+        return;
+    };
+
+    let _ = request_permission.call0(&notification_ctor);
+}
+
+fn send_slot_increase_notification(server: &Server, previous_slots: u32) {
+    if notification_permission().as_deref() != Some("granted") {
+        return;
+    }
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(notification_ctor) = Reflect::get(&window, &JsValue::from_str("Notification")) else {
+        return;
+    };
+    let Ok(notification_function) = notification_ctor.dyn_into::<Function>() else {
+        return;
+    };
+
+    let title = format!("{} gained players", server.name);
+    let body = format!(
+        "Slots {} -> {} (max {}) on {} [{}]",
+        previous_slots, server.slots, server.max_slots, server.map_label, server.game_mode_label
+    );
+    let options = Object::new();
+    let tag = format!("psb-slot-{}", server_storage_key(server));
+    let _ = Reflect::set(
+        &options,
+        &JsValue::from_str("body"),
+        &JsValue::from_str(&body),
+    );
+    let _ = Reflect::set(
+        &options,
+        &JsValue::from_str("tag"),
+        &JsValue::from_str(&tag),
+    );
+
+    let args = Array::new();
+    args.push(&JsValue::from_str(&title));
+    args.push(&JsValue::from(options));
+
+    let _ = Reflect::construct(&notification_function, &args);
+}
+
+fn confirm_remove_favorite(server_name: &str) -> bool {
+    let prompt = format!("Remove '{}' from favorites?", server_name);
+
+    web_sys::window()
+        .and_then(|window| window.confirm_with_message(&prompt).ok())
+        .unwrap_or(false)
 }
 
 fn format_server_updated_timestamp(raw: &str) -> String {
@@ -192,6 +297,9 @@ fn app() -> Html {
             .map(|value| SortCriteria::from_storage_value(&value))
             .unwrap_or(SortCriteria::Slots)
     });
+    let favorites = use_state(load_favorites);
+    let previous_favorite_slots = use_mut_ref(HashMap::<String, u32>::new);
+    let previous_slots_version = use_mut_ref(String::new);
 
     let is_version_popout_open = use_state(|| false);
 
@@ -231,8 +339,14 @@ fn app() -> Html {
     let fetch_data = {
         let servers = servers.clone();
         let version = version.clone();
+        let favorites = favorites.clone();
+        let previous_favorite_slots = previous_favorite_slots.clone();
+        let previous_slots_version = previous_slots_version.clone();
         Callback::from(move |_| {
             let servers = servers.clone();
+            let favorites = favorites.clone();
+            let previous_favorite_slots = previous_favorite_slots.clone();
+            let previous_slots_version = previous_slots_version.clone();
             let version = (*version).trim().to_string();
             if version.is_empty() {
                 return;
@@ -240,6 +354,38 @@ fn app() -> Html {
 
             spawn_local(async move {
                 if let Some(server_list) = fetch_server_list(&version).await {
+                    let favorite_lookup = (*favorites)
+                        .iter()
+                        .cloned()
+                        .collect::<HashSet<String>>();
+
+                    {
+                        let mut tracked_version = previous_slots_version.borrow_mut();
+                        let mut tracked_slots = previous_favorite_slots.borrow_mut();
+
+                        if tracked_version.as_str() != version.as_str() {
+                            tracked_slots.clear();
+                            *tracked_version = version.clone();
+                        }
+
+                        tracked_slots.retain(|server_key, _| favorite_lookup.contains(server_key));
+
+                        for server in &server_list.servers {
+                            let server_key = server_storage_key(server);
+                            if !favorite_lookup.contains(&server_key) {
+                                continue;
+                            }
+
+                            if let Some(previous_slots) = tracked_slots.get(&server_key) {
+                                if server.slots > *previous_slots {
+                                    send_slot_increase_notification(server, *previous_slots);
+                                }
+                            }
+
+                            tracked_slots.insert(server_key, server.slots);
+                        }
+                    }
+
                     servers.set(server_list.servers);
                 }
             });
@@ -268,12 +414,17 @@ fn app() -> Html {
         );
     }
 
+    let favorite_lookup = (*favorites)
+        .iter()
+        .cloned()
+        .collect::<HashSet<String>>();
+    let query = search_query.trim().to_lowercase();
+
     // Filter and sort
     let mut filtered_servers: Vec<Server> = servers
         .iter()
         .cloned()
         .filter(|server| {
-            let query = search_query.to_lowercase();
             if query.is_empty() {
                 true
             } else {
@@ -291,6 +442,8 @@ fn app() -> Html {
             filtered_servers.sort_by(|a, b| b.slots.cmp(&a.slots));
         }
     }
+
+    filtered_servers.sort_by_key(|server| !favorite_lookup.contains(&server_storage_key(server)));
 
     let on_toggle_version_popout = {
         let is_version_popout_open = is_version_popout_open.clone();
@@ -331,6 +484,33 @@ fn app() -> Html {
             let checked = input.checked();
             storage_set(STORAGE_KEY_AUTO_REFRESH, if checked { "true" } else { "false" });
             auto_refresh.set(checked);
+        })
+    };
+
+    let on_server_click = {
+        let favorites = favorites.clone();
+        let previous_favorite_slots = previous_favorite_slots.clone();
+        Callback::from(move |server: Server| {
+            let server_key = server_storage_key(&server);
+            let mut updated = (*favorites).clone();
+
+            if updated.iter().any(|existing| existing == &server_key) {
+                if !confirm_remove_favorite(&server.name) {
+                    return;
+                }
+
+                updated.retain(|existing| existing != &server_key);
+                previous_favorite_slots.borrow_mut().remove(&server_key);
+            } else {
+                updated.push(server_key.clone());
+                previous_favorite_slots
+                    .borrow_mut()
+                    .insert(server_key, server.slots);
+                request_notification_permission_if_needed();
+            }
+
+            storage_set(STORAGE_KEY_FAVORITES, &serialize_favorites(&updated));
+            favorites.set(updated);
         })
     };
 
@@ -564,12 +744,30 @@ fn app() -> Html {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    { for filtered_servers.iter().map(|server| html! {
-                                        <tr>
+                                    { for filtered_servers.iter().map(|server| {
+                                        let is_favorite = favorite_lookup.contains(&server_storage_key(server));
+                                        let on_server_row_click = {
+                                            let on_server_click = on_server_click.clone();
+                                            let server = server.clone();
+                                            Callback::from(move |_e: MouseEvent| {
+                                                on_server_click.emit(server.clone());
+                                            })
+                                        };
+
+                                        html! {
+                                        <tr class={classes!("server-row", if is_favorite { "server-row--favorite" } else { "" })} onclick={on_server_row_click}>
                                             <td data-label="Server Name">
-                                                <div class="td-content">
+                                                <div class="td-content server-name-content">
                                                     <div class="server-label">{ &server.name }</div>
                                                     <div class="server-sub-label">{ format!("{}:{}", server.ip, server.port) }</div>
+                                                    <span
+                                                        class={classes!("favorite-indicator", if is_favorite { "favorite-indicator--visible" } else { "" })}
+                                                        aria-hidden="true"
+                                                    >
+                                                        <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
+                                                            <path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>
+                                                        </svg>
+                                                    </span>
                                                 </div>
                                             </td>
                                             <td data-label="Map">
@@ -596,6 +794,7 @@ fn app() -> Html {
                                                 </div>
                                             </td>
                                         </tr>
+                                        }
                                     })}
                                 </tbody>
                             </table>
