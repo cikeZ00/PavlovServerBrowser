@@ -23,6 +23,10 @@ const STORAGE_KEY_REFRESH_INTERVAL: &str = "psb.refresh_interval";
 const STORAGE_KEY_SELECTED_VERSION: &str = "psb.selected_version";
 const STORAGE_KEY_CUSTOM_VERSIONS: &str = "psb.custom_versions";
 const STORAGE_KEY_FAVORITES: &str = "psb.favorites";
+const STORAGE_KEY_NOTIFICATIONS_ENABLED: &str = "psb.notifications_enabled";
+const STORAGE_KEY_NOTIFICATION_SOUND_ENABLED: &str = "psb.notification_sound_enabled";
+
+const KERNEL_NOTIFICATION_SOUND_URL: &str = "./sounds/Kernel.ogg";
 
 fn browser_storage() -> Option<Storage> {
     web_sys::window()?.local_storage().ok().flatten()
@@ -149,7 +153,41 @@ fn request_notification_permission_if_needed() {
     let _ = request_permission.call0(&notification_ctor);
 }
 
-fn send_slot_increase_notification(server: &Server, previous_slots: u32) {
+fn play_kernel_notification_sound() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(audio_ctor) = Reflect::get(&window, &JsValue::from_str("Audio")) else {
+        return;
+    };
+    let Ok(audio_function) = audio_ctor.dyn_into::<Function>() else {
+        return;
+    };
+
+    let args = Array::new();
+    args.push(&JsValue::from_str(KERNEL_NOTIFICATION_SOUND_URL));
+
+    let Ok(audio) = Reflect::construct(&audio_function, &args) else {
+        return;
+    };
+
+    let _ = Reflect::set(
+        &audio,
+        &JsValue::from_str("preload"),
+        &JsValue::from_str("auto"),
+    );
+
+    let Ok(play_method) = Reflect::get(&audio, &JsValue::from_str("play")) else {
+        return;
+    };
+    let Some(play_method) = play_method.dyn_ref::<Function>() else {
+        return;
+    };
+
+    let _ = play_method.call0(&audio);
+}
+
+fn send_slot_increase_notification(server: &Server, previous_slots: u32, play_sound: bool) {
     if notification_permission().as_deref() != Some("granted") {
         return;
     }
@@ -181,12 +219,21 @@ fn send_slot_increase_notification(server: &Server, previous_slots: u32) {
         &JsValue::from_str("tag"),
         &JsValue::from_str(&tag),
     );
+    let _ = Reflect::set(
+        &options,
+        &JsValue::from_str("renotify"),
+        &JsValue::from_bool(true),
+    );
 
     let args = Array::new();
     args.push(&JsValue::from_str(&title));
     args.push(&JsValue::from(options));
 
     let _ = Reflect::construct(&notification_function, &args);
+
+    if play_sound {
+        play_kernel_notification_sound();
+    }
 }
 
 fn confirm_remove_favorite(server_name: &str) -> bool {
@@ -287,6 +334,9 @@ fn app() -> Html {
     let search_query = use_state(|| "".to_string());
     let refresh_interval = use_state(|| load_u32(STORAGE_KEY_REFRESH_INTERVAL, 60, 5));
     let auto_refresh = use_state(|| load_bool(STORAGE_KEY_AUTO_REFRESH, false));
+    let notifications_enabled = use_state(|| load_bool(STORAGE_KEY_NOTIFICATIONS_ENABLED, true));
+    let notification_sound_enabled =
+        use_state(|| load_bool(STORAGE_KEY_NOTIFICATION_SOUND_ENABLED, true));
     let custom_versions = use_state(load_custom_versions);
     let version = use_state(|| {
         storage_get(STORAGE_KEY_SELECTED_VERSION).unwrap_or_else(|| DEFAULT_VERSION.to_string())
@@ -340,11 +390,15 @@ fn app() -> Html {
         let servers = servers.clone();
         let version = version.clone();
         let favorites = favorites.clone();
+        let notifications_enabled = notifications_enabled.clone();
+        let notification_sound_enabled = notification_sound_enabled.clone();
         let previous_favorite_slots = previous_favorite_slots.clone();
         let previous_slots_version = previous_slots_version.clone();
         Callback::from(move |_| {
             let servers = servers.clone();
             let favorites = favorites.clone();
+            let notifications_enabled = *notifications_enabled;
+            let notification_sound_enabled = *notification_sound_enabled;
             let previous_favorite_slots = previous_favorite_slots.clone();
             let previous_slots_version = previous_slots_version.clone();
             let version = (*version).trim().to_string();
@@ -376,9 +430,15 @@ fn app() -> Html {
                                 continue;
                             }
 
-                            if let Some(previous_slots) = tracked_slots.get(&server_key) {
-                                if server.slots > *previous_slots {
-                                    send_slot_increase_notification(server, *previous_slots);
+                            if notifications_enabled {
+                                if let Some(previous_slots) = tracked_slots.get(&server_key) {
+                                    if server.slots > *previous_slots {
+                                        send_slot_increase_notification(
+                                            server,
+                                            *previous_slots,
+                                            notification_sound_enabled,
+                                        );
+                                    }
                                 }
                             }
 
@@ -487,8 +547,38 @@ fn app() -> Html {
         })
     };
 
+    let on_toggle_notifications = {
+        let notifications_enabled = notifications_enabled.clone();
+        Callback::from(move |e: Event| {
+            let input: HtmlInputElement = e.target_unchecked_into();
+            let checked = input.checked();
+            storage_set(
+                STORAGE_KEY_NOTIFICATIONS_ENABLED,
+                if checked { "true" } else { "false" },
+            );
+            notifications_enabled.set(checked);
+            if checked {
+                request_notification_permission_if_needed();
+            }
+        })
+    };
+
+    let on_toggle_notification_sound = {
+        let notification_sound_enabled = notification_sound_enabled.clone();
+        Callback::from(move |e: Event| {
+            let input: HtmlInputElement = e.target_unchecked_into();
+            let checked = input.checked();
+            storage_set(
+                STORAGE_KEY_NOTIFICATION_SOUND_ENABLED,
+                if checked { "true" } else { "false" },
+            );
+            notification_sound_enabled.set(checked);
+        })
+    };
+
     let on_server_click = {
         let favorites = favorites.clone();
+        let notifications_enabled = notifications_enabled.clone();
         let previous_favorite_slots = previous_favorite_slots.clone();
         Callback::from(move |server: Server| {
             let server_key = server_storage_key(&server);
@@ -506,7 +596,9 @@ fn app() -> Html {
                 previous_favorite_slots
                     .borrow_mut()
                     .insert(server_key, server.slots);
-                request_notification_permission_if_needed();
+                if *notifications_enabled {
+                    request_notification_permission_if_needed();
+                }
             }
 
             storage_set(STORAGE_KEY_FAVORITES, &serialize_favorites(&updated));
@@ -722,6 +814,37 @@ fn app() -> Html {
                                 />
                                 <span class="m3-checkbox__label">{ "Auto refresh" }</span>
                             </label>
+                        </div>
+
+                        <div class="m3-field">
+                            <span class="m3-label" style="visibility: hidden;">{ "\u{00A0}" }</span>
+                            <label class="m3-checkbox">
+                                <input
+                                    id="slot_notifications"
+                                    class="m3-checkbox__input"
+                                    type="checkbox"
+                                    checked={*notifications_enabled}
+                                    onchange={on_toggle_notifications}
+                                />
+                                <span class="m3-checkbox__label">{ "Notifications" }</span>
+                            </label>
+                            <span class="m3-helper">{ "Notifications for favorited servers (on player join)" }</span>
+                        </div>
+
+                        <div class="m3-field">
+                            <span class="m3-label" style="visibility: hidden;">{ "\u{00A0}" }</span>
+                            <label class="m3-checkbox">
+                                <input
+                                    id="kernel_notification_sound"
+                                    class="m3-checkbox__input"
+                                    type="checkbox"
+                                    checked={*notification_sound_enabled}
+                                    onchange={on_toggle_notification_sound}
+                                    disabled={!*notifications_enabled}
+                                />
+                                <span class="m3-checkbox__label">{ "Notification audio" }</span>
+                            </label>
+                            <span class="m3-helper">{ "Built-in notification audio" }</span>
                         </div>
                     </div>
                 </section>
