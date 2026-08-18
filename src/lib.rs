@@ -15,7 +15,7 @@ use known_versions::KNOWN_VERSIONS;
 
 const SERVER_LIST_URL: &str =
     "https://prod2-crossplay-pavlov-ms.vankrupt.net/servers/v2/list/{}/steam/0/0/0/all";
-const DEFAULT_VERSION: &str = "1.0.27";
+const DEFAULT_VERSION: &str = "1.0.28";
 
 const STORAGE_KEY_AUTO_REFRESH: &str = "psb.auto_refresh";
 const STORAGE_KEY_SORT_BY: &str = "psb.sort_by";
