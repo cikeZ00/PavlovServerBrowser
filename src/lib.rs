@@ -1,6 +1,7 @@
 mod known_versions;
 
 use std::collections::{HashMap, HashSet};
+use std::cmp::Ordering;
 
 use gloo_net::http::Request;
 use gloo_timers::callback::Interval;
@@ -15,7 +16,6 @@ use known_versions::KNOWN_VERSIONS;
 
 const SERVER_LIST_URL: &str =
     "https://prod2-crossplay-pavlov-ms.vankrupt.net/servers/v2/list/{}/steam/0/0/0/all";
-const DEFAULT_VERSION: &str = "1.0.28";
 
 const STORAGE_KEY_AUTO_REFRESH: &str = "psb.auto_refresh";
 const STORAGE_KEY_SORT_BY: &str = "psb.sort_by";
@@ -115,6 +115,24 @@ fn merge_version_options(custom_versions: &[String]) -> Vec<String> {
     }
 
     options
+}
+
+fn version_tuple(version: &str) -> Vec<u32> {
+    version.split('.').filter_map(|s| s.parse::<u32>().ok()).collect()
+}
+
+fn max_version(versions: &[String]) -> Option<String> {
+    versions.iter().max_by(|a, b| {
+        let a_parts = version_tuple(a);
+        let b_parts = version_tuple(b);
+        for (a_part, b_part) in a_parts.iter().zip(b_parts.iter()) {
+            let cmp = a_part.cmp(b_part);
+            if cmp != Ordering::Equal {
+                return cmp;
+            }
+        }
+        a_parts.len().cmp(&b_parts.len())
+    }).cloned()
 }
 
 fn server_storage_key(server: &Server) -> String {
@@ -338,9 +356,15 @@ fn app() -> Html {
     let notification_sound_enabled =
         use_state(|| load_bool(STORAGE_KEY_NOTIFICATION_SOUND_ENABLED, true));
     let custom_versions = use_state(load_custom_versions);
-    let version = use_state(|| {
-        storage_get(STORAGE_KEY_SELECTED_VERSION).unwrap_or_else(|| DEFAULT_VERSION.to_string())
-    });
+
+    let version_options = {
+        let custom = (*custom_versions).clone();
+        merge_version_options(&custom)
+    };
+
+    let default_version = max_version(&version_options).unwrap() ;
+    let version = use_state(|| default_version);
+
     let version_to_add = use_state(String::new);
     let sort_criteria = use_state(|| {
         storage_get(STORAGE_KEY_SORT_BY)
@@ -353,7 +377,6 @@ fn app() -> Html {
 
     let is_version_popout_open = use_state(|| false);
 
-    let version_options = merge_version_options(&custom_versions);
     let selected_version = (*version).clone();
     let can_remove_selected_version = custom_versions
         .iter()
@@ -374,9 +397,12 @@ fn app() -> Html {
                         version.set(matched.clone());
                         storage_set(STORAGE_KEY_SELECTED_VERSION, matched);
                     }
-                } else if let Some(first) = options.first() {
-                    version.set(first.clone());
-                    storage_set(STORAGE_KEY_SELECTED_VERSION, first);
+                } else {
+                    // Pick the highest available version in case the selected version is no longer available.
+                    if let Some(max_ver) = max_version(options) {
+                        version.set(max_ver.clone());
+                        storage_set(STORAGE_KEY_SELECTED_VERSION, &max_ver);
+                    }
                 }
 
                 Box::new(|| {})
@@ -494,16 +520,34 @@ fn app() -> Html {
         })
         .collect();
 
-    match *sort_criteria {
-        SortCriteria::Name => {
-            filtered_servers.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    filtered_servers.sort_by(|a, b| {
+        let a_fav = favorite_lookup.contains(&server_storage_key(a));
+        let b_fav = favorite_lookup.contains(&server_storage_key(b));
+        match (a_fav, b_fav) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            _ => {
+                match *sort_criteria {
+                    SortCriteria::Name => {
+                        let name_cmp = a.name.to_lowercase().cmp(&b.name.to_lowercase());
+                        if name_cmp != Ordering::Equal {
+                            name_cmp
+                        } else {
+                            b.slots.cmp(&a.slots)
+                        }
+                    }
+                    SortCriteria::Slots => {
+                        let slots_cmp = b.slots.cmp(&a.slots);
+                        if slots_cmp != Ordering::Equal {
+                            slots_cmp
+                        } else {
+                            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                        }
+                    }
+                }
+            }
         }
-        SortCriteria::Slots => {
-            filtered_servers.sort_by(|a, b| b.slots.cmp(&a.slots));
-        }
-    }
-
-    filtered_servers.sort_by_key(|server| !favorite_lookup.contains(&server_storage_key(server)));
+    });
 
     let on_toggle_version_popout = {
         let is_version_popout_open = is_version_popout_open.clone();
@@ -676,7 +720,7 @@ fn app() -> Html {
             let next_version = options
                 .first()
                 .cloned()
-                .unwrap_or_else(|| DEFAULT_VERSION.to_string());
+                .unwrap();
 
             storage_set(
                 STORAGE_KEY_CUSTOM_VERSIONS,
@@ -699,11 +743,6 @@ fn app() -> Html {
             storage_set(STORAGE_KEY_SORT_BY, criteria.as_storage_value());
             sort_criteria.set(criteria);
         })
-    };
-
-    let sort_value = match *sort_criteria {
-        SortCriteria::Name => "Name",
-        SortCriteria::Slots => "Slots",
     };
 
     html! {
@@ -733,9 +772,9 @@ fn app() -> Html {
 
                         <label class="m3-field">
                             <span class="m3-label">{ "Sort by" }</span>
-                            <select id="sort" class="m3-select" value={sort_value} onchange={on_sort_change}>
-                                <option value="Name">{ "Name" }</option>
-                                <option value="Slots">{ "Slots" }</option>
+                            <select id="sort" class="m3-select" onchange={on_sort_change}>
+                                <option value="Slots" selected={*sort_criteria == SortCriteria::Slots}>{ "Slots" }</option>
+                                <option value="Name" selected={*sort_criteria == SortCriteria::Name}>{ "Name" }</option>
                             </select>
                         </label>
                     </div>
@@ -748,9 +787,14 @@ fn app() -> Html {
                             <div class="version-input-group">
                                 <label class="m3-field" style="flex: 1;">
                                     <span class="m3-label">{ "Version" }</span>
-                                    <select id="version" class="m3-select" value={(*version).clone()} onchange={on_version_change}>
-                                        { for version_options.iter().map(|option| html! {
-                                            <option value={option.clone()}>{ option.clone() }</option>
+                                    <select id="version" class="m3-select" onchange={on_version_change}>
+                                        { for version_options.iter().map(|option| {
+                                            let is_selected = option == &*version;
+                                            html! {
+                                                <option value={option.clone()} selected={is_selected}>
+                                                    { option.clone() }
+                                                </option>
+                                            }
                                         })}
                                     </select>
                                     <span class="m3-helper">{ format!("{} repo versions, {} custom", KNOWN_VERSIONS.len(), custom_versions.len()) }</span>
@@ -881,7 +925,9 @@ fn app() -> Html {
                                         <tr class={classes!("server-row", if is_favorite { "server-row--favorite" } else { "" })} onclick={on_server_row_click}>
                                             <td data-label="Server Name">
                                                 <div class="td-content server-name-content">
-                                                    <div class="server-label">{ &server.name }</div>
+                                                    <div class="server-label">
+                                                        { &server.name }
+                                                    </div>
                                                     <div class="server-sub-label">{ format!("{}:{}", server.ip, server.port) }</div>
                                                     <span
                                                         class={classes!("favorite-indicator", if is_favorite { "favorite-indicator--visible" } else { "" })}
@@ -910,10 +956,26 @@ fn app() -> Html {
                                                     <div class="server-label">{ format!("{}/{}", server.slots, server.max_slots) }</div>
                                                 </div>
                                             </td>
-                                            <td data-label="Version">
+                                           <td data-label="Version">
                                                 <div class="td-content">
-                                                    <div class="server-label">{ &server.version }</div>
-                                                    <div class="server-sub-label server-updated-pill">{ format_server_updated_timestamp(&server.updated) }</div>
+                                                    <div class="server-label">
+                                                        { &server.version }
+                                                    </div>
+                                                    <div class="server-sub-label" style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center;">
+                                                        <span class={classes!("status-pill", if server.b_password_protected { "status-pill--active" } else { "status-pill--inactive" })}>
+                                                            <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
+                                                                <path d="M12 2C9.24 2 7 4.24 7 7v3H6c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2v-8c0-1.1-.9-2-2-2h-1V7c0-2.76-2.24-5-5-5zm0 2c1.66 0 3 1.34 3 3v3H9V7c0-1.66 1.34-3 3-3zm-1 9h2v4h-2v-4z"/>
+                                                            </svg>
+                                                            { if server.b_password_protected { "PW" } else { "No PW" } }
+                                                        </span>
+                                                        <span class={classes!("status-pill", if server.b_secured { "status-pill--active" } else { "status-pill--inactive" })}>
+                                                            <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
+                                                                <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5L12 1zm0 2.18l7 3.12v5.7c0 4.83-3.13 9.37-7 10.54-3.87-1.17-7-5.71-7-10.54V6.3l7-3.12z"/>
+                                                            </svg>
+                                                            { if server.b_secured { "Secure" } else { "No Secure" } }
+                                                        </span>
+                                                        <span class="server-updated-pill">{ format_server_updated_timestamp(&server.updated) }</span>
+                                                    </div>
                                                 </div>
                                             </td>
                                         </tr>
